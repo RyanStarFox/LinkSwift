@@ -766,7 +766,69 @@
 		 */
 		convertLinkToAria2(link, filename, headers) {
 			filename = base.fixFilename(filename);
-			return `aria2c "${link}" --out "${filename}"${headers ? (" " + headers) : ""}`;
+			let selected = base.getValue("setting_aria2_rpc").find(i => i.default) || {};
+			let dir = base.getAria2EffectiveDir(selected);
+			let dirArg = dir ? ` --dir "${String(dir).replaceAll("\"", "\\\"")}"` : "";
+			return `aria2c "${link}" --out "${filename}"${dirArg}${headers ? (" " + headers) : ""}`;
+		},
+
+		getAria2EffectiveDir(rpc = {}) {
+			let customDir = (rpc.customDir ?? "").toString().trim();
+			if (customDir) return customDir;
+			let dir = (rpc.dir ?? "").toString().trim();
+			return dir || undefined;
+		},
+
+		parseAria2ExtraOptions(rawOptions = "") {
+			let text = (rawOptions ?? "").toString().trim();
+			if (!text) return { ok: true, options: {} };
+			try {
+				if (text.startsWith("{")) {
+					let parsed = JSON.parse(text);
+					if (!parsed || base.isType(parsed) !== "object" || Array.isArray(parsed)) {
+						return { ok: false, message: "附加参数需为 JSON 对象" };
+					}
+					return { ok: true, options: parsed };
+				}
+				let tokenList = text.match(/"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|\S+/g) || [];
+				let options = {};
+				tokenList.forEach((token) => {
+					let item = token.trim();
+					if ((item.startsWith("\"") && item.endsWith("\"")) || (item.startsWith("'") && item.endsWith("'"))) {
+						item = item.slice(1, -1);
+					}
+					if (!item.startsWith("--")) return;
+					let raw = item.slice(2);
+					if (!raw) return;
+					let splitIndex = raw.indexOf("=");
+					if (splitIndex > -1) {
+						let key = raw.slice(0, splitIndex).trim();
+						let value = raw.slice(splitIndex + 1).trim();
+						if (!key) return;
+						options[key] = value || "true";
+					} else {
+						options[raw.trim()] = "true";
+					}
+				});
+				return { ok: true, options };
+			} catch (error) {
+				return { ok: false, message: `附加参数格式错误：${error?.message || "未知错误"}` };
+			}
+		},
+
+		isRpcSuccess(result) {
+			if (result === "success") return true;
+			return result?.status === "success";
+		},
+
+		getRpcErrorText(result, fallback = "发送失败") {
+			if (!result || result === "fail") return fallback;
+			if (result?.status === "success") return "";
+			let code = (result?.code !== undefined && result?.code !== null && result?.code !== "") ? `[${result.code}] ` : "";
+			let message = result?.message || "";
+			let detail = result?.detail || "";
+			let text = `${code}${message}${detail ? ` ${detail}` : ""}`.trim();
+			return text ? `${fallback}：${text}` : fallback;
 		},
 
 		/**
@@ -862,31 +924,55 @@
 			return this.sendLinkToAria2.lock = this.sendLinkToAria2.lock.then(async () => {
 				let list = base.getValue("setting_aria2_rpc");
 				let selected = list.find(i => i.default);
+				if (!selected) return { status: "fail", message: "未找到 Aria2 默认配置" };
 				let rpc = {
 					domain: selected.domain,
 					port: selected.port,
 					path: selected.path,
 					dir: selected.dir,
+					customDir: selected.customDir,
+					extraOptions: selected.extraOptions,
 					token: selected.token
 				};
 				let url = `${rpc.domain}:${rpc.port}${rpc.path}`;
-				let dir = (rpc.dir !== null && rpc.dir !== "") ? rpc.dir : undefined;
+				let dir = base.getAria2EffectiveDir(rpc);
+				let parsedExtra = base.parseAria2ExtraOptions(rpc.extraOptions);
+				if (!parsedExtra.ok) {
+					return { status: "fail", message: parsedExtra.message };
+				}
+				let options = {
+					out: base.fixFilename(filename)
+				};
+				if (dir) options.dir = dir;
+				if (headers && base.isType(headers) === "array" && headers.length > 0) options.header = headers;
+				Object.assign(options, parsedExtra.options);
 				let data = {
 					id: new Date().getTime(),
 					jsonrpc: "2.0",
 					method: "aria2.addUri",
-					params: [`token:${rpc.token}`, [link], {
-						dir,
-						out: filename,
-						header: headers
-					}]
+					params: [`token:${rpc.token}`, [link], options]
 				};
 				try {
 					let res = await base.post(url, data, {}, "");
-					if (res.result) return "success";
-					return "fail";
+					if (res?.result) return { status: "success", result: res.result };
+					if (res?.error) {
+						return {
+							status: "fail",
+							code: res.error.code,
+							message: res.error.message || "Aria2 RPC 请求失败",
+							detail: res.error.data ? JSON.stringify(res.error.data) : ""
+						};
+					}
+					let detail = "";
+					if (base.isType(res) === "string") detail = res;
+					if (!detail && base.isType(res) === "object") detail = JSON.stringify(res);
+					return { status: "fail", message: "Aria2 RPC 返回异常", detail };
 				} catch (e) {
-					return "fail";
+					return {
+						status: "fail",
+						message: e?.message || "请求异常",
+						detail: base.isType(e) === "object" ? JSON.stringify(e) : ""
+					};
 				}
 			});
 		},
@@ -2023,6 +2109,8 @@
 							path: "/jsonrpc",
 							token: "",
 							dir: "",
+							customDir: "",
+							extraOptions: "",
 							default: true
 						}
 					]
@@ -2108,6 +2196,8 @@
 						// 跳过 default 的自动合并
 						if (key === "default") continue;
 						if (key === "dir" && target[key] !== undefined) continue;
+						if (key === "customDir" && target[key] !== undefined) continue;
+						if (key === "extraOptions" && target[key] !== undefined) continue;
 						if (key === "token" && target[key] !== undefined) continue;
 						if (key === "authName" && target[key] !== undefined) continue;
 						if (key === "authPass" && target[key] !== undefined) continue;
@@ -2326,6 +2416,14 @@
 				<label class="pl-setting-item">
 					<div>存储路径</div>
 					<input type="text" autocomplete="off" placeholder="文件下载后保存路径，例如 D:\\Downloads\\，留空则默认" class="swal2-input pl-input listener-rpc-input" data-type="aria2.dir" value="">
+				</label>
+				<label class="pl-setting-item">
+					<div>自定义路径</div>
+					<input type="text" autocomplete="off" placeholder="推送时优先使用该路径，留空则使用上方存储路径" class="swal2-input pl-input listener-rpc-input" data-type="aria2.customDir" value="">
+				</label>
+				<label class="pl-setting-item">
+					<div>附加参数</div>
+					<input type="text" autocomplete="off" placeholder="支持 JSON 或 CLI 形式，如 --no-conf 或 {\"max-connection-per-server\":\"8\"}" class="swal2-input pl-input listener-rpc-input" data-type="aria2.extraOptions" value="">
 				</label>`;
 			Swal.fire({
 				...temp.swalDefault,
@@ -5092,10 +5190,10 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
 				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$baidu.api.ua.downloadLink}`]);
-				if (res === "success") {
+				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
-					target.addClass("pl-btn-danger").text("发送失败，检查一下您的配置信息哦!").animate({ opacity: "0.5" }, "slow");
+					target.addClass("pl-btn-danger").text(base.getRpcErrorText(res, "发送失败")).animate({ opacity: "0.5" }, "slow");
 				}
 				await base.sleep(3000);
 				target.removeClass("pl-btn-danger").removeAttr("data-processing").html(originalHtml).css("opacity", "");
@@ -6184,10 +6282,10 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
 				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`Referer:https://${location.host}/`]);
-				if (res === "success") {
+				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
-					target.addClass("pl-btn-danger").text("发送失败，检查一下您的配置信息哦!").animate({ opacity: "0.5" }, "slow");
+					target.addClass("pl-btn-danger").text(base.getRpcErrorText(res, "发送失败")).animate({ opacity: "0.5" }, "slow");
 				}
 				await base.sleep(3000);
 				target.removeClass("pl-btn-danger").removeAttr("data-processing").html(originalHtml).css("opacity", "");
@@ -6576,10 +6674,10 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
 				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"));
-				if (res === "success") {
+				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
-					target.addClass("pl-btn-danger").text("发送失败，检查一下您的配置信息哦!").animate({ opacity: "0.5" }, "slow");
+					target.addClass("pl-btn-danger").text(base.getRpcErrorText(res, "发送失败")).animate({ opacity: "0.5" }, "slow");
 				}
 				await base.sleep(3000);
 				target.removeClass("pl-btn-danger").removeAttr("data-processing").html(originalHtml).css("opacity", "");
@@ -7027,10 +7125,10 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
 				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"));
-				if (res === "success") {
+				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
-					target.addClass("pl-btn-danger").text("发送失败，检查一下您的配置信息哦!").animate({ opacity: "0.5" }, "slow");
+					target.addClass("pl-btn-danger").text(base.getRpcErrorText(res, "发送失败")).animate({ opacity: "0.5" }, "slow");
 				}
 				await base.sleep(3000);
 				target.removeClass("pl-btn-danger").removeAttr("data-processing").html(originalHtml).css("opacity", "");
@@ -7393,10 +7491,10 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
 				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"));
-				if (res === "success") {
+				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
-					target.addClass("pl-btn-danger").text("发送失败，检查一下您的配置信息哦!").animate({ opacity: "0.5" }, "slow");
+					target.addClass("pl-btn-danger").text(base.getRpcErrorText(res, "发送失败")).animate({ opacity: "0.5" }, "slow");
 				}
 				await base.sleep(3000);
 				target.removeClass("pl-btn-danger").removeAttr("data-processing").html(originalHtml).css("opacity", "");
@@ -7750,10 +7848,10 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
 				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$quark.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`]);
-				if (res === "success") {
+				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
-					target.addClass("pl-btn-danger").text("发送失败，检查一下您的配置信息哦!").animate({ opacity: "0.5" }, "slow");
+					target.addClass("pl-btn-danger").text(base.getRpcErrorText(res, "发送失败")).animate({ opacity: "0.5" }, "slow");
 				}
 				await base.sleep(3000);
 				target.removeClass("pl-btn-danger").removeAttr("data-processing").html(originalHtml).css("opacity", "");
@@ -8181,10 +8279,10 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
 				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$uc.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`]);
-				if (res === "success") {
+				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
-					target.addClass("pl-btn-danger").text("发送失败，检查一下您的配置信息哦!").animate({ opacity: "0.5" }, "slow");
+					target.addClass("pl-btn-danger").text(base.getRpcErrorText(res, "发送失败")).animate({ opacity: "0.5" }, "slow");
 				}
 				await base.sleep(3000);
 				target.removeClass("pl-btn-danger").removeAttr("data-processing").html(originalHtml).css("opacity", "");
@@ -8568,10 +8666,10 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
 				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"));
-				if (res === "success") {
+				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
-					target.addClass("pl-btn-danger").text("发送失败，检查一下您的配置信息哦!").animate({ opacity: "0.5" }, "slow");
+					target.addClass("pl-btn-danger").text(base.getRpcErrorText(res, "发送失败")).animate({ opacity: "0.5" }, "slow");
 				}
 				await base.sleep(3000);
 				target.removeClass("pl-btn-danger").removeAttr("data-processing").html(originalHtml).css("opacity", "");

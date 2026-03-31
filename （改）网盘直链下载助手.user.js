@@ -764,12 +764,20 @@
 		 * @param {String} [headers] - 自定义请求头参数（可选）
 		 * @returns {String} 编码后的 aria2c 命令字符串
 		 */
-		convertLinkToAria2(link, filename, headers) {
+		convertLinkToAria2(link, filename, headers, runtime = {}) {
 			filename = base.fixFilename(filename);
 			let selected = base.getValue("setting_aria2_rpc").find(i => i.default) || {};
-			let dir = base.getAria2EffectiveDir(selected);
+			let runtimeDir = (runtime?.dir ?? "").toString().trim();
+			let runtimeExtra = (runtime?.extraOptions ?? "").toString();
+			let dir = base.getAria2EffectiveDir({ ...selected, customDir: runtimeDir || selected.customDir });
+			let parsedConfigExtra = base.parseAria2ExtraOptions(selected.extraOptions);
+			if (!parsedConfigExtra.ok) return `生成命令失败：${parsedConfigExtra.message}`;
+			let parsedRuntimeExtra = base.parseAria2ExtraOptions(runtimeExtra);
+			if (!parsedRuntimeExtra.ok) return `生成命令失败：${parsedRuntimeExtra.message}`;
+			let mergedExtra = base.sanitizeAria2ExtraOptions({ ...parsedConfigExtra.options, ...parsedRuntimeExtra.options });
 			let dirArg = dir ? ` --dir "${String(dir).replaceAll("\"", "\\\"")}"` : "";
-			return `aria2c "${link}" --out "${filename}"${dirArg}${headers ? (" " + headers) : ""}`;
+			let extraArg = base.convertAria2ExtraOptionsToArgs(mergedExtra);
+			return `aria2c "${link}" --out "${filename}"${dirArg}${extraArg}${headers ? (" " + headers) : ""}`;
 		},
 
 		getAria2EffectiveDir(rpc = {}) {
@@ -814,6 +822,61 @@
 			} catch (error) {
 				return { ok: false, message: `附加参数格式错误：${error?.message || "未知错误"}` };
 			}
+		},
+
+		sanitizeAria2ExtraOptions(options = {}) {
+			let clean = {};
+			let blocked = ["out", "header", "dir"];
+			Object.keys(options || {}).forEach((key) => {
+				if (blocked.includes(String(key).trim())) return;
+				clean[key] = options[key];
+			});
+			return clean;
+		},
+
+		convertAria2ExtraOptionsToArgs(options = {}) {
+			let args = [];
+			Object.entries(options || {}).forEach(([key, value]) => {
+				let argKey = String(key || "").trim();
+				if (!argKey) return;
+				let argValue = String(value ?? "").trim();
+				if (!argValue || argValue === "true") {
+					args.push(` --${argKey}`);
+					return;
+				}
+				args.push(` --${argKey}="${argValue.replaceAll("\"", "\\\"")}"`);
+			});
+			return args.join("");
+		},
+
+		async promptAria2RuntimeOptions() {
+			let result = await Swal.fire({
+				...temp.swalDefault,
+				title: "推送参数",
+				html: `<label class="pl-setting-item">
+					<div>本次自定义路径（可空）</div>
+					<input id="pl-aria2-runtime-dir" type="text" autocomplete="off" placeholder="留空则使用默认路径" class="swal2-input pl-input">
+				</label>
+				<label class="pl-setting-item">
+					<div>本次附加参数（可空）</div>
+					<input id="pl-aria2-runtime-extra" type="text" autocomplete="off" placeholder="支持 --no-conf 或 JSON" class="swal2-input pl-input">
+				</label>`,
+				showCancelButton: true,
+				confirmButtonText: "确定",
+				cancelButtonText: "取消",
+				preConfirm: () => {
+					let dir = $("#pl-aria2-runtime-dir").val()?.toString().trim() || "";
+					let extraOptions = $("#pl-aria2-runtime-extra").val()?.toString().trim() || "";
+					return { dir, extraOptions };
+				}
+			});
+			if (!result.isConfirmed) return false;
+			return result.value || { dir: "", extraOptions: "" };
+		},
+
+		async getAria2RuntimeContext() {
+			if (temp.aria2BatchRuntimeContext) return { ...temp.aria2BatchRuntimeContext };
+			return await base.promptAria2RuntimeOptions();
 		},
 
 		isRpcSuccess(result) {
@@ -919,7 +982,7 @@
 		 * @param {Array} [headers] - 自定义请求头参数（可选）
 		 * @returns {Promise<"success"|"fail">} 发送态结果
 		 */
-		async sendLinkToAria2(link, filename, headers) {
+		async sendLinkToAria2(link, filename, headers, runtime = {}) {
 			if (!this.sendLinkToAria2.lock) this.sendLinkToAria2.lock = Promise.resolve();
 			return this.sendLinkToAria2.lock = this.sendLinkToAria2.lock.then(async () => {
 				let list = base.getValue("setting_aria2_rpc");
@@ -935,17 +998,24 @@
 					token: selected.token
 				};
 				let url = `${rpc.domain}:${rpc.port}${rpc.path}`;
-				let dir = base.getAria2EffectiveDir(rpc);
-				let parsedExtra = base.parseAria2ExtraOptions(rpc.extraOptions);
-				if (!parsedExtra.ok) {
-					return { status: "fail", message: parsedExtra.message };
+				let runtimeDir = (runtime?.dir ?? "").toString().trim();
+				let runtimeExtra = (runtime?.extraOptions ?? "").toString();
+				let dir = base.getAria2EffectiveDir({ ...rpc, customDir: runtimeDir || rpc.customDir });
+				let parsedConfigExtra = base.parseAria2ExtraOptions(rpc.extraOptions);
+				if (!parsedConfigExtra.ok) {
+					return { status: "fail", message: parsedConfigExtra.message };
 				}
+				let parsedRuntimeExtra = base.parseAria2ExtraOptions(runtimeExtra);
+				if (!parsedRuntimeExtra.ok) {
+					return { status: "fail", message: parsedRuntimeExtra.message };
+				}
+				let mergedExtra = base.sanitizeAria2ExtraOptions({ ...parsedConfigExtra.options, ...parsedRuntimeExtra.options });
 				let options = {
 					out: base.fixFilename(filename)
 				};
 				if (dir) options.dir = dir;
 				if (headers && base.isType(headers) === "array" && headers.length > 0) options.header = headers;
-				Object.assign(options, parsedExtra.options);
+				Object.assign(options, mergedExtra);
 				let data = {
 					id: new Date().getTime(),
 					jsonrpc: "2.0",
@@ -3425,7 +3495,7 @@
 						content.find(".pl-main").append(`<div class="pl-item">
 							<div class="pl-item-name listener-tip" data-size="${size}"><div class="name">${filename}</div><div class="size">${base.sizeFormat(size)}</div></div>
 							<button class="pl-item-link pl-btn-primary pl-btn-default listener-aria2-download" data-filename="${filename}" data-link="${dlink}"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-cloud-arrow-up"/></svg><span>推送链接到 Aria2 下载器</span></button>
-							<button class="pl-btn-primary pl-btn-info listener-copy listener-tip" data-copy='${finalink}' data-title="Aria2 没启用 RPC？点击复制 aria2c 命令行手动下载"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-copy"/></svg>复制下载命令行</button>
+							<button class="pl-btn-primary pl-btn-info listener-copy listener-tip listener-aria2-copy-single" data-copy='${finalink}' data-link="${dlink}" data-filename="${filename}" data-aria2-headers="${(convert?.aria2 || "").replaceAll("\"", "&quot;")}" data-title="Aria2 没启用 RPC？点击复制 aria2c 命令行手动下载"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-copy"/></svg>复制下载命令行</button>
 						</div>`);
 					}
 					if (temp.mode === "bitcomet") {
@@ -3462,7 +3532,7 @@
 				content.find(".pl-extra").append(`<button class="pl-btn-primary pl-btn-success aria2 listener-rpc-task youxiaohou listener-tip" data-title="访问原作者的 Aria2 管理页面以查看下载任务，功能较少"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-list-check"/></svg>查看任务 (油小猴)</button>`);
 				content.find(".pl-extra").append(`<button class="pl-btn-primary pl-btn-success aria2 listener-rpc-task ariang listener-tip" data-title="访问 AriaNg 的官方 Demo 以查看下载任务，功能较多"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-list-check"/></svg>查看任务 (AriaNg)</button>`);
 				if (list.length >= 2) content.find(".pl-extra").append(`<button class="pl-btn-primary pl-btn-default aria2 listener-send-rpc" data-type="aria2"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-cloud-arrow-up"/></svg>全部推送至下载器</button>`);
-				if (list.length >= 2) content.find(".pl-extra").append(`<button class="pl-btn-primary pl-btn-info aria2 listener-copy listener-tip" data-copy='${allLink}' data-title="Aria2 没启用 RPC？点击复制 aria2c 命令行手动下载"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-copy"/></svg>复制全部命令行</button>`);
+				if (list.length >= 2) content.find(".pl-extra").append(`<button class="pl-btn-primary pl-btn-info aria2 listener-copy listener-tip listener-aria2-copy-all" data-copy='${allLink}' data-aria2-headers="${(convert?.aria2 || "").replaceAll("\"", "&quot;")}" data-title="Aria2 没启用 RPC？点击复制 aria2c 命令行手动下载"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-copy"/></svg>复制全部命令行</button>`);
 			} else if (temp.mode === "bitcomet") {
 				let rpc = base.getValue("setting_bitcomet_rpc").find(i => i.default);
 				content.find(".pl-extra").append(`<button class="pl-btn-primary pl-btn-warning bitcomet listener-open-bitcomet-setting listener-tip" data-title="${rpc.domain + ":" + rpc.port + rpc.path}" data-back-to-downloads="true"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-gear"/></svg>修改服务参数</button>`);
@@ -3634,11 +3704,19 @@
 			$doc.on("click", ".listener-send-rpc", async function (e) {
 				let target = $(e.currentTarget);
 				let originalHtml = target.html();
+				if (target.data("type") === "aria2") {
+					let runtime = await base.promptAria2RuntimeOptions();
+					if (runtime === false) return;
+					temp.aria2BatchRuntimeContext = runtime;
+				}
 				$(`.listener-${target.data("type")}-download`).each((index, element) => {
 					if ($(element).attr("data-processing") !== "true") {
 						$(element).click();
 					}
 				});
+				if (target.data("type") === "aria2") {
+					delete temp.aria2BatchRuntimeContext;
+				}
 				target.text("发送完成，结果见上方按钮哦~").animate({ opacity: "0.5" }, "slow");
 				await base.sleep(2000);
 				target.css("opacity", "");
@@ -3648,6 +3726,32 @@
 				e.preventDefault();
 				let target = $(e.currentTarget);
 				let originalHtml = target.html();
+				if (target.hasClass("listener-aria2-copy-single")) {
+					let runtime = await base.promptAria2RuntimeOptions();
+					if (runtime === false) return;
+					let copy = base.convertLinkToAria2(target.data("link"), target.data("filename"), target.data("aria2Headers"), runtime);
+					base.setClipboard(copy)
+					target.html(`<svg class="pl-icon"><use xlink:href="#pl-icon-fa-check"/></svg>复制成功`).animate({ opacity: "0.5" }, "slow");
+					await base.sleep(2000);
+					target.css("opacity", "");
+					target.html(originalHtml);
+					return;
+				}
+				if (target.hasClass("listener-aria2-copy-all")) {
+					let runtime = await base.promptAria2RuntimeOptions();
+					if (runtime === false) return;
+					let aria2Headers = target.data("aria2Headers");
+					let copy = $(".listener-aria2-download").map((index, element) => {
+						let item = $(element);
+						return base.convertLinkToAria2(item.data("link"), item.data("filename"), aria2Headers, runtime);
+					}).get().join("\r\n");
+					base.setClipboard(copy)
+					target.html(`<svg class="pl-icon"><use xlink:href="#pl-icon-fa-check"/></svg>复制成功`).animate({ opacity: "0.5" }, "slow");
+					await base.sleep(2000);
+					target.css("opacity", "");
+					target.html(originalHtml);
+					return;
+				}
 				let copy = target.data("copy");
 				if (copy) {
 					base.setClipboard(copy)
@@ -5189,7 +5293,12 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-icon").remove();
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$baidu.api.ua.downloadLink}`]);
+				let runtime = await base.getAria2RuntimeContext();
+				if (runtime === false) {
+					target.removeAttr("data-processing").html(originalHtml);
+					return;
+				}
+				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$baidu.api.ua.downloadLink}`], runtime);
 				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
@@ -6281,7 +6390,12 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-icon").remove();
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`Referer:https://${location.host}/`]);
+				let runtime = await base.getAria2RuntimeContext();
+				if (runtime === false) {
+					target.removeAttr("data-processing").html(originalHtml);
+					return;
+				}
+				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`Referer:https://${location.host}/`], runtime);
 				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
@@ -6673,7 +6787,12 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-icon").remove();
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"));
+				let runtime = await base.getAria2RuntimeContext();
+				if (runtime === false) {
+					target.removeAttr("data-processing").html(originalHtml);
+					return;
+				}
+				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), undefined, runtime);
 				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
@@ -7124,7 +7243,12 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-icon").remove();
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"));
+				let runtime = await base.getAria2RuntimeContext();
+				if (runtime === false) {
+					target.removeAttr("data-processing").html(originalHtml);
+					return;
+				}
+				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), undefined, runtime);
 				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
@@ -7490,7 +7614,12 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-icon").remove();
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"));
+				let runtime = await base.getAria2RuntimeContext();
+				if (runtime === false) {
+					target.removeAttr("data-processing").html(originalHtml);
+					return;
+				}
+				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), undefined, runtime);
 				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
@@ -7847,7 +7976,12 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-icon").remove();
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$quark.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`]);
+				let runtime = await base.getAria2RuntimeContext();
+				if (runtime === false) {
+					target.removeAttr("data-processing").html(originalHtml);
+					return;
+				}
+				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$quark.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`], runtime);
 				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
@@ -8278,7 +8412,12 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-icon").remove();
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$uc.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`]);
+				let runtime = await base.getAria2RuntimeContext();
+				if (runtime === false) {
+					target.removeAttr("data-processing").html(originalHtml);
+					return;
+				}
+				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$uc.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`], runtime);
 				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {
@@ -8665,7 +8804,12 @@ button.downloadSubtitle:disabled {
 				target.find(".pl-icon").remove();
 				target.find(".pl-loading").remove();
 				target.prepend(base.createLoading());
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"));
+				let runtime = await base.getAria2RuntimeContext();
+				if (runtime === false) {
+					target.removeAttr("data-processing").html(originalHtml);
+					return;
+				}
+				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), undefined, runtime);
 				if (base.isRpcSuccess(res)) {
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
 				} else {

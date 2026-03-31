@@ -874,6 +874,47 @@
 			});
 		},
 
+		postAria2Rpc(url, rpcData) {
+			return new Promise((resolve, reject) => {
+				base.xmlHttpRequest({
+					method: "POST",
+					url,
+					withCredentials: false,
+					anonymous: true,
+					headers: {
+						"Content-Type": "application/json;charset=UTF-8",
+						"Accept": "application/json, text/plain, */*"
+					},
+					data: JSON.stringify(rpcData),
+					responseType: "json",
+					onloadstart() {
+						base.console.log("【LinkSwift】Post(start) Aria2RPC\n请求地址：" + url + "\n请求内容：", rpcData);
+					},
+					onload(res) {
+						let responseData = res.response;
+						if (!responseData && res.responseText) {
+							try { responseData = JSON.parse(res.responseText); } catch { }
+						}
+						base.console.log("【LinkSwift】Post(load) Aria2RPC\n请求地址：" + url + "\n请求结果：", res);
+						if (res.status >= 200 && res.status < 300) {
+							resolve(responseData ?? res.responseText ?? "");
+							return;
+						}
+						reject({
+							status: res.status,
+							statusText: res.statusText,
+							response: responseData,
+							responseText: res.responseText || ""
+						});
+					},
+					onerror(err) {
+						base.console.error("【LinkSwift】Post(error) Aria2RPC\n请求失败", err);
+						reject(err);
+					}
+				});
+			});
+		},
+
 		isRpcSuccess(result) {
 			if (result === "success") return true;
 			return result?.status === "success";
@@ -1018,7 +1059,7 @@
 					params: [`token:${rpc.token}`, [link], options]
 				};
 				try {
-					let res = await base.post(url, data, {}, "");
+					let res = await base.postAria2Rpc(url, data);
 					if (res?.result) return { status: "success", result: res.result };
 					if (res?.error) {
 						return {
@@ -1033,6 +1074,15 @@
 					if (!detail && base.isType(res) === "object") detail = JSON.stringify(res);
 					return { status: "fail", message: "Aria2 RPC 返回异常", detail };
 				} catch (e) {
+					if (e?.status) {
+						let rpcError = e?.response?.error;
+						return {
+							status: "fail",
+							code: e.status,
+							message: rpcError?.message || e?.statusText || `HTTP ${e.status}`,
+							detail: rpcError?.data ? JSON.stringify(rpcError.data) : (e?.responseText || "")
+						};
+					}
 					return {
 						status: "fail",
 						message: e?.message || "请求异常",

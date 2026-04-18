@@ -862,6 +862,14 @@
 			};
 		},
 
+		getAria2RuntimeFilename(target) {
+			let current = target?.jquery ? target : $(target);
+			let item = current.closest(".pl-item");
+			let customFilename = item.find(".listener-aria2-runtime-filename").val()?.toString().trim();
+			let fallback = (current.data("filename") ?? item.find(".listener-aria2-download").data("filename") ?? "").toString();
+			return customFilename || fallback;
+		},
+
 		showActionSuccess(title = "操作成功") {
 			Swal.fire({
 				toast: true,
@@ -3539,6 +3547,10 @@
 						allLink.push(finalink);
 						content.find(".pl-main").append(`<div class="pl-item">
 							<div class="pl-item-name listener-tip" data-size="${size}"><div class="name">${filename}</div><div class="size">${base.sizeFormat(size)}</div></div>
+							<div class="pl-setting-item" style="width:100%">
+								<div>下载后文件名（可改）</div>
+								<input type="text" autocomplete="off" class="swal2-input pl-input listener-aria2-runtime-filename" value="${filename.replaceAll("\"", "&quot;")}">
+							</div>
 							<button class="pl-item-link pl-btn-primary pl-btn-default listener-aria2-download" data-filename="${filename}" data-link="${dlink}"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-cloud-arrow-up"/></svg><span>推送链接到 Aria2 下载器</span></button>
 							<button class="pl-btn-primary pl-btn-info listener-copy listener-tip listener-aria2-copy-single" data-copy='${finalink}' data-link="${dlink}" data-filename="${filename}" data-aria2-headers="${(convert?.aria2 || "").replaceAll("\"", "&quot;")}" data-title="Aria2 没启用 RPC？点击复制 aria2c 命令行手动下载"><svg class="pl-icon"><use xlink:href="#pl-icon-fa-copy"/></svg>复制下载命令行</button>
 						</div>`);
@@ -3781,7 +3793,7 @@
 				let originalHtml = target.html();
 				if (target.hasClass("listener-aria2-copy-single")) {
 					let runtime = base.getAria2RuntimeContext();
-					let copy = base.convertLinkToAria2(target.data("link"), target.data("filename"), target.data("aria2Headers"), runtime);
+					let copy = base.convertLinkToAria2(target.data("link"), base.getAria2RuntimeFilename(target), target.data("aria2Headers"), runtime);
 					base.setClipboard(copy)
 					base.showActionSuccess("复制命令成功");
 					target.html(`<svg class="pl-icon"><use xlink:href="#pl-icon-fa-check"/></svg>复制成功`).animate({ opacity: "0.5" }, "slow");
@@ -3795,7 +3807,7 @@
 					let aria2Headers = target.data("aria2Headers");
 					let copy = $(".listener-aria2-download").map((index, element) => {
 						let item = $(element);
-						return base.convertLinkToAria2(item.data("link"), item.data("filename"), aria2Headers, runtime);
+						return base.convertLinkToAria2(item.data("link"), base.getAria2RuntimeFilename(item), aria2Headers, runtime);
 					}).get().join("\r\n");
 					base.setClipboard(copy)
 					base.showActionSuccess("复制命令成功");
@@ -5351,7 +5363,7 @@ button.downloadSubtitle:disabled {
 					target.removeAttr("data-processing").html(originalHtml);
 					return;
 				}
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$baidu.api.ua.downloadLink}`], runtime);
+				let res = await base.sendLinkToAria2(target.data("link"), base.getAria2RuntimeFilename(target), [`User-Agent:${config.$baidu.api.ua.downloadLink}`], runtime);
 				if (base.isRpcSuccess(res)) {
 					base.showActionSuccess("推送成功");
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
@@ -6449,7 +6461,7 @@ button.downloadSubtitle:disabled {
 					target.removeAttr("data-processing").html(originalHtml);
 					return;
 				}
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`Referer:https://${location.host}/`], runtime);
+				let res = await base.sendLinkToAria2(target.data("link"), base.getAria2RuntimeFilename(target), [`Referer:https://${location.host}/`], runtime);
 				if (base.isRpcSuccess(res)) {
 					base.showActionSuccess("推送成功");
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
@@ -6847,7 +6859,7 @@ button.downloadSubtitle:disabled {
 					target.removeAttr("data-processing").html(originalHtml);
 					return;
 				}
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), undefined, runtime);
+				let res = await base.sendLinkToAria2(target.data("link"), base.getAria2RuntimeFilename(target), undefined, runtime);
 				if (base.isRpcSuccess(res)) {
 					base.showActionSuccess("推送成功");
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
@@ -7304,7 +7316,7 @@ button.downloadSubtitle:disabled {
 					target.removeAttr("data-processing").html(originalHtml);
 					return;
 				}
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), undefined, runtime);
+				let res = await base.sendLinkToAria2(target.data("link"), base.getAria2RuntimeFilename(target), undefined, runtime);
 				if (base.isRpcSuccess(res)) {
 					base.showActionSuccess("推送成功");
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
@@ -7676,7 +7688,7 @@ button.downloadSubtitle:disabled {
 					target.removeAttr("data-processing").html(originalHtml);
 					return;
 				}
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), undefined, runtime);
+				let res = await base.sendLinkToAria2(target.data("link"), base.getAria2RuntimeFilename(target), undefined, runtime);
 				if (base.isRpcSuccess(res)) {
 					base.showActionSuccess("推送成功");
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
@@ -8039,7 +8051,7 @@ button.downloadSubtitle:disabled {
 					target.removeAttr("data-processing").html(originalHtml);
 					return;
 				}
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$quark.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`], runtime);
+				let res = await base.sendLinkToAria2(target.data("link"), base.getAria2RuntimeFilename(target), [`User-Agent:${config.$quark.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`], runtime);
 				if (base.isRpcSuccess(res)) {
 					base.showActionSuccess("推送成功");
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
@@ -8476,7 +8488,7 @@ button.downloadSubtitle:disabled {
 					target.removeAttr("data-processing").html(originalHtml);
 					return;
 				}
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), [`User-Agent:${config.$uc.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`], runtime);
+				let res = await base.sendLinkToAria2(target.data("link"), base.getAria2RuntimeFilename(target), [`User-Agent:${config.$uc.api.ua.downloadLink}`, `Referer:https://${location.host}/`, `Cookie:${document.cookie}`], runtime);
 				if (base.isRpcSuccess(res)) {
 					base.showActionSuccess("推送成功");
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
@@ -8869,7 +8881,7 @@ button.downloadSubtitle:disabled {
 					target.removeAttr("data-processing").html(originalHtml);
 					return;
 				}
-				let res = await base.sendLinkToAria2(target.data("link"), target.data("filename"), undefined, runtime);
+				let res = await base.sendLinkToAria2(target.data("link"), base.getAria2RuntimeFilename(target), undefined, runtime);
 				if (base.isRpcSuccess(res)) {
 					base.showActionSuccess("推送成功");
 					target.removeClass("pl-btn-danger").html("发送成功啦!快去看看吧~").animate({ opacity: "0.5" }, "slow");
